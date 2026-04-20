@@ -23,207 +23,209 @@ SOFTWARE.
 See more at https://thingpulse.com
 */
 
-//Monsteryuan forked from Daniel Eichhorn/ThingPulse ESP8266 Weather Station
+// Monsteryuan forked from Daniel Eichhorn/ThingPulse ESP8266 Weather Station
 
-#include <DS18B20.h>
 #include <Arduino.h>
+#include <DS18B20.h>
+#include <coredecls.h>
+#include <sys/time.h>
+#include <time.h>
 
-#include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
-// time
-#include <time.h>                       // time() ctime()
-#include <sys/time.h>                   // struct timeval
-#include <coredecls.h>                  // settimeofday_cb()
 
-
-#include "SH1106Wire.h"//or #include "SSD1306Wire.h"
-#include "OLEDDisplayUi.h"
-#include "Wire.h"
 #include "HeFeng.h"
-
+#include "OLEDDisplayUi.h"
+#include "SH1106Wire.h"
 #include "WeatherStationFonts.h"
 #include "WeatherStationImages.h"
+#include "Wire.h"
 
-
-/***************************
- * Begin Settings
- **************************/
+// Begin Settings
 
 DS18B20 ds(D7);
 
+constexpr int kTz = -8;
+constexpr int kDstMn = 0;
 
-#define TZ              -8       // (utc+) TZ in hours
-#define DST_MN          0      // use 60mn for summer time in some countries
+constexpr int kUpdateIntervalSecs = 20 * 60;
+constexpr int kUpdateCurrIntervalSecs = 10;
 
-// Setup
-const int UPDATE_INTERVAL_SECS = 20 * 60; // Update every 20 minutes  online weather
-// Setup
-const int UPDATE_CURR_INTERVAL_SECS = 10; // Update every 10 secs DS18B20
-
-// Display Settings
-const int I2C_DISPLAY_ADDRESS = 0x3c;
+constexpr int kI2cDisplayAddress = 0x3c;
 #if defined(ESP8266)
-const int SDA_PIN = D2;
-const int SDC_PIN = D5;
+constexpr int kSdaPin = D2;
+constexpr int kSdcPin = D5;
 #endif
 
+const String kWdayNames[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+const String kMonthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-const String WDAY_NAMES[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-const String MONTH_NAMES[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+// End Settings
 
-/***************************
- * End Settings
- **************************/
- // Initialize the oled display for address 0x3c
- // sda-pin=14 and sdc-pin=12
- SH1106Wire     display(I2C_DISPLAY_ADDRESS, SDA_PIN, SDC_PIN);   // or SSD1306Wire  display(I2C_DISPLAY_ADDRESS, SDA_PIN, SDC_PIN);
- OLEDDisplayUi   ui( &display );
+SH1106Wire display(kI2cDisplayAddress, kSdaPin, kSdcPin);
+OLEDDisplayUi ui(&display);
 
-HeFengCurrentData currentWeather;
-HeFengForeData foreWeather[3];
- HeFeng HeFengClient;
+HeFengCurrentData current_weather;
+HeFengForeData fore_weather[3];
+HeFeng he_feng_client;
 
-//OpenWeatherMapForecastData forecasts[MAX_FORECASTS];
-//OpenWeatherMapForecast forecastClient;
+constexpr int kTzMn = (kTz)*60;
+constexpr int kTzSec = (kTz)*3600;
+constexpr int kDstSec = (kDstMn)*60;
 
-#define TZ_MN           ((TZ)*60)
-#define TZ_SEC          ((TZ)*3600)
-#define DST_SEC         ((DST_MN)*60)
-
-const char* HEFENG_KEY="";
-const char* HEFENG_LOCATION="";
+const char* kHefengKey = "";
+const char* kHefengLocation = "";
 time_t now;
 
-// flag changed in the ticker function every 10 minutes
-bool readyForWeatherUpdate = false;
+bool ready_for_weather_update = false;
 
-String lastUpdate = "--";
+String last_update = "--";
 
-long timeSinceLastWUpdate = 0;
-long timeSinceLastCurrUpdate = 0;
+long time_since_last_w_update = 0;
+long time_since_last_curr_update = 0;
 
-String currTemp="-1.0";
-//declaring prototypes
-void drawProgress(OLEDDisplay *display, int percentage, String label);
-void updateData(OLEDDisplay *display);
-void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
-void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
-void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y);
-void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex);
-void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state);
-void setReadyForWeatherUpdate();
+String curr_temp = "-1.0";
 
+// Function prototypes
+void DrawProgress(OLEDDisplay* display, int percentage, String label);
+void UpdateData(OLEDDisplay* display);
+void DrawDateTime(OLEDDisplay* display, OLEDDisplayUiState* state, int16_t x,
+                  int16_t y);
+void DrawCurrentWeather(OLEDDisplay* display, OLEDDisplayUiState* state,
+                        int16_t x, int16_t y);
+void DrawForecast(OLEDDisplay* display, OLEDDisplayUiState* state, int16_t x,
+                  int16_t y);
+void DrawForecastDetails(OLEDDisplay* display, int x, int y, int day_index);
+void DrawHeaderOverlay(OLEDDisplay* display, OLEDDisplayUiState* state);
+void SetReadyForWeatherUpdate();
 
-// Add frames
-// this array keeps function pointers to all frames
-// frames are the single views that slide from right to left
-FrameCallback frames[] = { drawDateTime, drawCurrentWeather,drawForecast };
-//drawForecast
-int numberOfFrames = 3;
+FrameCallback frames[] = {DrawDateTime, DrawCurrentWeather, DrawForecast};
+int number_of_frames = 3;
 
-OverlayCallback overlays[] = { drawHeaderOverlay };
-int numberOfOverlays = 1;
+OverlayCallback overlays[] = {DrawHeaderOverlay};
+int number_of_overlays = 1;
 
-
-
-bool autoConfig()
-{
+bool AutoConfig() {
   WiFi.mode(WIFI_STA);
   WiFi.begin();
   Serial.print("AutoConfig Waiting......");
-   int counter = 0;
-  for (int i = 0; i < 20; i++)
-  {
-    if (WiFi.status() == WL_CONNECTED)
-    {
+  int counter = 0;
+  for (int i = 0; i < 20; i++) {
+    if (WiFi.status() == WL_CONNECTED) {
       Serial.println("AutoConfig Success");
       Serial.printf("SSID:%s\r\n", WiFi.SSID().c_str());
       Serial.printf("PSW:%s\r\n", WiFi.psk().c_str());
       WiFi.printDiag(Serial);
       return true;
-    }
-    else
-    {
-       delay(500);
-    Serial.print(".");
-    display.clear();
-    display.drawString(64, 10, "Connecting to WiFi");
-    display.drawXbm(46, 30, 8, 8, counter % 3 == 0 ? activeSymbole : inactiveSymbole);
-    display.drawXbm(60, 30, 8, 8, counter % 3 == 1 ? activeSymbole : inactiveSymbole);
-    display.drawXbm(74, 30, 8, 8, counter % 3 == 2 ? activeSymbole : inactiveSymbole);
-    display.display(); 
-     counter++; 
+    } else {
+      delay(500);
+      Serial.print(".");
+      display.clear();
+      display.drawString(64, 10, "Connecting to WiFi");
+      display.drawXbm(46, 30, 8, 8,
+                      counter % 3 == 0 ? activeSymbole : inactiveSymbole);
+      display.drawXbm(60, 30, 8, 8,
+                      counter % 3 == 1 ? activeSymbole : inactiveSymbole);
+      display.drawXbm(74, 30, 8, 8,
+                      counter % 3 == 2 ? activeSymbole : inactiveSymbole);
+      display.display();
+      counter++;
     }
   }
-  Serial.println("AutoConfig Faild!" );
+  Serial.println("AutoConfig Faild!");
   return false;
 }
 
 ESP8266WebServer server(80);
-String HTML_TITLE = "<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\"><title>ESP8266网页配网</title>";
-String HTML_SCRIPT_ONE = "<script type=\"text/javascript\">function wifi(){var ssid = s.value;var password = p.value;var xmlhttp=new XMLHttpRequest();xmlhttp.open(\"GET\",\"/HandleWifi?ssid=\"+ssid+\"&password=\"+password,true);xmlhttp.send();xmlhttp.onload = function(e){alert(this.responseText);}}</script>";
-String HTML_SCRIPT_TWO = "<script>function c(l){document.getElementById('s').value=l.innerText||l.textContent;document.getElementById('p').focus();}</script>";
-String HTML_HEAD_BODY_BEGIN = "</head><body>请输入wifi信息进行配网:";
-String HTML_FORM_ONE = "<form>WiFi名称：<input id='s' name='s' type=\"text\" placeholder=\"请输入您WiFi的名称\"><br>WiFi密码：<input id='p' name='p' type=\"text\" placeholder=\"请输入您WiFi的密码\"><br><input type=\"button\" value=\"扫描\" onclick=\"window.location.href = '/HandleScanWifi'\"><input type=\"button\" value=\"连接\" onclick=\"wifi()\"></form>";
-String HTML_BODY_HTML_END = "</body></html>";
+String kHtmlTitle =
+    "<!DOCTYPE html><html><head><meta http-equiv=\"Content-Type\" "
+    "content=\"text/html; charset=utf-8\"><meta name=\"viewport\" "
+    "content=\"width=device-width, initial-scale=1.0\"><meta "
+    "http-equiv=\"X-UA-Compatible\" content=\"ie=edge\"><title>ESP8266网页配网"
+    "</title>";
+String kHtmlScriptOne =
+    "<script type=\"text/javascript\">function wifi(){var ssid = "
+    "s.value;var password = p.value;var xmlhttp=new "
+    "XMLHttpRequest();xmlhttp.open(\"GET\",\"/"
+    "HandleWifi?ssid=\"+ssid+\"&password=\"+password,true);xmlhttp.send();"
+    "xmlhttp.onload = function(e){alert(this.responseText);}}</script>";
+String kHtmlScriptTwo =
+    "<script>function "
+    "c(l){document.getElementById('s').value=l.innerText||l.textContent;"
+    "document.getElementById('p').focus();}</script>";
+String kHtmlHeadBodyBegin = "</head><body>请输入wifi信息进行配网:";
+String kHtmlFormOne =
+    "<form>WiFi名称：<input id='s' name='s' type=\"text\" "
+    "placeholder=\"请输入您WiFi的名称\"><br>WiFi密码：<input id='p' name='p' "
+    "type=\"text\" placeholder=\"请输入您WiFi的密码\"><br><input "
+    "type=\"button\" value=\"扫描\" onclick=\"window.location.href = "
+    "'/HandleScanWifi'\"><input type=\"button\" value=\"连接\" "
+    "onclick=\"wifi()\"></form>";
+String kHtmlBodyHtmlEnd = "</body></html>";
 
-void handleRoot() {
-    Serial.println("root page");
-    String str = HTML_TITLE + HTML_SCRIPT_ONE + HTML_SCRIPT_TWO + HTML_HEAD_BODY_BEGIN + HTML_FORM_ONE + HTML_BODY_HTML_END;
-    server.send(200, "text/html", str);
+void HandleRoot() {
+  Serial.println("root page");
+  String str = kHtmlTitle + kHtmlScriptOne + kHtmlScriptTwo +
+               kHtmlHeadBodyBegin + kHtmlFormOne + kHtmlBodyHtmlEnd;
+  server.send(200, "text/html", str);
 }
 
 void HandleScanWifi() {
-    Serial.println("scan start");
+  Serial.println("scan start");
 
-    String HTML_FORM_TABLE_BEGIN = "<table><head><tr><th>序号</th><th>名称</th><th>强度</th></tr></head><body>";
-    String HTML_FORM_TABLE_END = "</body></table>";
-    String HTML_FORM_TABLE_CON = "";
-    String HTML_TABLE;
-    // WiFi.scanNetworks will return the number of networks found
-    int n = WiFi.scanNetworks();
-    Serial.println("scan done");
-    if (n == 0) {
-        Serial.println("no networks found");
-        HTML_TABLE = "NO WIFI !!!";
+  String html_form_table_begin =
+      "<table><head><tr><th>序号</th><th>名称</th><th>强度</th></tr></"
+      "head><body>";
+  String html_form_table_end = "</body></table>";
+  String html_form_table_con = "";
+  String html_table;
+  int n = WiFi.scanNetworks();
+  Serial.println("scan done");
+  if (n == 0) {
+    Serial.println("no networks found");
+    html_table = "NO WIFI !!!";
+  } else {
+    Serial.print(n);
+    Serial.println(" networks found");
+    for (int i = 0; i < n; ++i) {
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(")");
+      Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
+      delay(10);
+      html_form_table_con =
+          html_form_table_con + "<tr><td align=\"center\">" +
+          String(i + 1) + "</td><td align=\"center\">" +
+          "<a href='#p' onclick='c(this)'>" + WiFi.SSID(i) +
+          "</a>" + "</td><td align=\"center\">" + WiFi.RSSI(i) + "</td></tr>";
     }
-    else {
-        Serial.print(n);
-        Serial.println(" networks found");
-        for (int i = 0; i < n; ++i) {
-      // Print SSID and RSSI for each network found
-            Serial.print(i + 1);
-            Serial.print(": ");
-            Serial.print(WiFi.SSID(i));
-            Serial.print(" (");
-            Serial.print(WiFi.RSSI(i));
-            Serial.print(")");
-            Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
-            delay(10);
-            HTML_FORM_TABLE_CON = HTML_FORM_TABLE_CON + "<tr><td align=\"center\">" + String(i+1) + "</td><td align=\"center\">" + "<a href='#p' onclick='c(this)'>" + WiFi.SSID(i) + "</a>" + "</td><td align=\"center\">" + WiFi.RSSI(i) + "</td></tr>";
-        }
+    html_table =
+        html_form_table_begin + html_form_table_con + html_form_table_end;
+  }
+  Serial.println("");
 
-        HTML_TABLE = HTML_FORM_TABLE_BEGIN + HTML_FORM_TABLE_CON + HTML_FORM_TABLE_END;
-    }
-    Serial.println("");
+  String scanstr = kHtmlTitle + kHtmlScriptOne + kHtmlScriptTwo +
+                   kHtmlHeadBodyBegin + kHtmlFormOne + html_table +
+                   kHtmlBodyHtmlEnd;
 
-    String scanstr = HTML_TITLE + HTML_SCRIPT_ONE + HTML_SCRIPT_TWO + HTML_HEAD_BODY_BEGIN + HTML_FORM_ONE + HTML_TABLE + HTML_BODY_HTML_END;
-
-    server.send(200, "text/html", scanstr);
+  server.send(200, "text/html", scanstr);
 }
 
-void HandleWifi()
-{
-    String wifis = server.arg("ssid"); //从JavaScript发送的数据中找ssid的值
-    String wifip = server.arg("password"); //从JavaScript发送的数据中找password的值
-    Serial.println("received:"+wifis);
-    server.send(200, "text/html", "连接中..");
-    WiFi.begin(wifis,wifip);
+void HandleWifi() {
+  String wifis = server.arg("ssid");
+  String wifip = server.arg("password");
+  Serial.println("received:" + wifis);
+  server.send(200, "text/html", "连接中..");
+  WiFi.begin(wifis, wifip);
 }
 
-void handleNotFound() { 
+void HandleNotFound() {
   String message = "File Not Found\n\n";
   message += "URI: ";
   message += server.uri();
@@ -238,51 +240,50 @@ void handleNotFound() {
   server.send(404, "text/plain", message);
 }
 
-void htmlConfig()
-{
-    WiFi.mode(WIFI_AP_STA);//设置模式为AP+STA
-    WiFi.softAP("wifi_clock");
+void HtmlConfig() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("wifi_clock");
 
-    IPAddress myIP = WiFi.softAPIP();
-  
-    if (MDNS.begin("clock")) {
-      Serial.println("MDNS responder started");
+  IPAddress my_ip = WiFi.softAPIP();
+
+  if (MDNS.begin("clock")) {
+    Serial.println("MDNS responder started");
+  }
+
+  server.on("/", HandleRoot);
+  server.on("/HandleWifi", HTTP_GET, HandleWifi);
+  server.on("/HandleScanWifi", HandleScanWifi);
+  server.onNotFound(HandleNotFound);
+  MDNS.addService("http", "tcp", 80);
+  server.begin();
+  Serial.println("HTTP server started");
+  int counter = 0;
+  while (1) {
+    server.handleClient();
+    MDNS.update();
+    delay(500);
+    display.clear();
+    display.drawString(64, 5, "WIFI AP:wifi_clock");
+    display.drawString(64, 20, "192.168.4.1");
+    display.drawString(64, 35, "waiting for config wifi.");
+    display.drawXbm(46, 50, 8, 8,
+                    counter % 3 == 0 ? activeSymbole : inactiveSymbole);
+    display.drawXbm(60, 50, 8, 8,
+                    counter % 3 == 1 ? activeSymbole : inactiveSymbole);
+    display.drawXbm(74, 50, 8, 8,
+                    counter % 3 == 2 ? activeSymbole : inactiveSymbole);
+    display.display();
+    counter++;
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("HtmlConfig Success");
+      Serial.printf("SSID:%s\r\n", WiFi.SSID().c_str());
+      Serial.printf("PSW:%s\r\n", WiFi.psk().c_str());
+      Serial.println("HTML连接成功");
+      break;
     }
-    
-    server.on("/", handleRoot);
-    server.on("/HandleWifi", HTTP_GET, HandleWifi);
-    server.on("/HandleScanWifi", HandleScanWifi);
-    server.onNotFound(handleNotFound);//请求失败回调函数
-    MDNS.addService("http", "tcp", 80);
-    server.begin();//开启服务器
-    Serial.println("HTTP server started");
-    int counter = 0;
-    while(1)
-    {
-        server.handleClient();
-        MDNS.update();  
-         delay(500);
-          display.clear();
-          display.drawString(64, 5, "WIFI AP:wifi_clock");
-          display.drawString(64, 20, "192.168.4.1");
-           display.drawString(64, 35, "waiting for config wifi.");
-          display.drawXbm(46, 50, 8, 8, counter % 3 == 0 ? activeSymbole : inactiveSymbole);
-          display.drawXbm(60, 50, 8, 8, counter % 3 == 1 ? activeSymbole : inactiveSymbole);
-          display.drawXbm(74, 50, 8, 8, counter % 3 == 2 ? activeSymbole : inactiveSymbole);
-          display.display();  
-           counter++;
-        if (WiFi.status() == WL_CONNECTED)
-        {
-            Serial.println("HtmlConfig Success");
-            Serial.printf("SSID:%s\r\n", WiFi.SSID().c_str());
-            Serial.printf("PSW:%s\r\n", WiFi.psk().c_str());
-            Serial.println("HTML连接成功");
-            break;
-        }
-    }
-       server.close();  
-       WiFi.mode(WIFI_STA);
-    
+  }
+  server.close();
+  WiFi.mode(WIFI_STA);
 }
 
 void setup() {
@@ -290,84 +291,67 @@ void setup() {
   Serial.println();
   Serial.println();
 
-  // initialize dispaly
   display.init();
   display.clear();
   display.display();
 
-  //display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
   display.setContrast(255);
 
- bool wifiConfig = autoConfig();
-    if(wifiConfig == false){
-        htmlConfig();//HTML配网
-    }
+  bool wifi_config = AutoConfig();
+  if (wifi_config == false) {
+    HtmlConfig();
+  }
 
   ui.setTargetFPS(30);
 
   ui.setActiveSymbol(activeSymbole);
   ui.setInactiveSymbol(inactiveSymbole);
 
-  // You can change this to
-  // TOP, LEFT, BOTTOM, RIGHT
   ui.setIndicatorPosition(BOTTOM);
 
-  // Defines where the first frame is located in the bar.
   ui.setIndicatorDirection(LEFT_RIGHT);
 
-  // You can change the transition that is used
-  // SLIDE_LEFT, SLIDE_RIGHT, SLIDE_TOP, SLIDE_DOWN
   ui.setFrameAnimation(SLIDE_LEFT);
 
-  ui.setFrames(frames, numberOfFrames);
+  ui.setFrames(frames, number_of_frames);
   ui.setTimePerFrame(7500);
-  ui.setOverlays(overlays, numberOfOverlays);
+  ui.setOverlays(overlays, number_of_overlays);
 
-  // Inital UI takes care of initalising the display too.
   ui.init();
 
   Serial.println("");
-  configTime(TZ_SEC, DST_SEC, "pool.ntp.org","0.cn.pool.ntp.org","1.cn.pool.ntp.org");
-  updateData(&display);
-
+  configTime(kTzSec, kDstSec, "pool.ntp.org", "0.cn.pool.ntp.org",
+             "1.cn.pool.ntp.org");
+  UpdateData(&display);
 }
 
 void loop() {
-
-  if (millis() - timeSinceLastWUpdate > (1000L*UPDATE_INTERVAL_SECS)) {
-    setReadyForWeatherUpdate();
-    timeSinceLastWUpdate = millis();
+  if (millis() - time_since_last_w_update > (1000L * kUpdateIntervalSecs)) {
+    SetReadyForWeatherUpdate();
+    time_since_last_w_update = millis();
   }
- if (millis() - timeSinceLastCurrUpdate > (1000L*UPDATE_CURR_INTERVAL_SECS)) {
-    if( ui.getUiState()->frameState == FIXED)
-    {
-    currTemp=String(ds.getTempC(), 1);
-    timeSinceLastCurrUpdate = millis();
+  if (millis() - time_since_last_curr_update >
+      (1000L * kUpdateCurrIntervalSecs)) {
+    if (ui.getUiState()->frameState == FIXED) {
+      curr_temp = String(ds.getTempC(), 1);
+      time_since_last_curr_update = millis();
     }
   }
 
-
-
-
-  if (readyForWeatherUpdate && ui.getUiState()->frameState == FIXED) {
-    updateData(&display);
+  if (ready_for_weather_update && ui.getUiState()->frameState == FIXED) {
+    UpdateData(&display);
   }
 
-  int remainingTimeBudget = ui.update();
+  int remaining_time_budget = ui.update();
 
-  if (remainingTimeBudget > 0) {
-    // You can do some work here
-    // Don't do stuff if you are below your
-    // time budget.
-    delay(remainingTimeBudget);
+  if (remaining_time_budget > 0) {
+    delay(remaining_time_budget);
   }
-
-
 }
 
-void drawProgress(OLEDDisplay *display, int percentage, String label) {
+void DrawProgress(OLEDDisplay* display, int percentage, String label) {
   display->clear();
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
@@ -376,105 +360,111 @@ void drawProgress(OLEDDisplay *display, int percentage, String label) {
   display->display();
 }
 
+void UpdateData(OLEDDisplay* display) {
+  DrawProgress(display, 30, "Updating weather...");
 
-void updateData(OLEDDisplay *display) {
-  drawProgress(display, 30, "Updating weather...");
+  for (int i = 0; i < 5; i++) {
+    he_feng_client.DoUpdateCurr(&current_weather, kHefengKey, kHefengLocation);
+    if (current_weather.cond_txt != "no network") {
+      break;
+    }
+  }
+  DrawProgress(display, 50, "Updating forecasts...");
 
-for(int i=0;i<5;i++){
-  HeFengClient.doUpdateCurr(&currentWeather, HEFENG_KEY, HEFENG_LOCATION);
-  if(currentWeather.cond_txt!="no network"){
-    break;}
- }
-  drawProgress(display, 50, "Updating forecasts...");
-  
- for(int i=0;i<5;i++){
-  HeFengClient.doUpdateFore(foreWeather, HEFENG_KEY, HEFENG_LOCATION);
-    if(foreWeather[0].datestr!="N/A"){
-    break;}
- }
- 
-  readyForWeatherUpdate = false;
-  drawProgress(display, 100, "Done...");
+  for (int i = 0; i < 5; i++) {
+    he_feng_client.DoUpdateFore(fore_weather, kHefengKey, kHefengLocation);
+    if (fore_weather[0].date_str != "N/A") {
+      break;
+    }
+  }
+
+  ready_for_weather_update = false;
+  DrawProgress(display, 100, "Done...");
   delay(1000);
 }
 
-
-
-void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
+void DrawDateTime(OLEDDisplay* display, OLEDDisplayUiState* state, int16_t x,
+                  int16_t y) {
   now = time(nullptr);
-  struct tm* timeInfo;
-  timeInfo = localtime(&now);
+  struct tm* time_info;
+  time_info = localtime(&now);
   char buff[16];
-
 
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_16);
-  String date = WDAY_NAMES[timeInfo->tm_wday];
- 
-  sprintf_P(buff, PSTR("%04d-%02d-%02d, %s"), timeInfo->tm_year + 1900, timeInfo->tm_mon+1, timeInfo->tm_mday, WDAY_NAMES[timeInfo->tm_wday].c_str());
+  String date = kWdayNames[time_info->tm_wday];
+
+  sprintf_P(buff, PSTR("%04d-%02d-%02d, %s"), time_info->tm_year + 1900,
+            time_info->tm_mon + 1, time_info->tm_mday,
+            kWdayNames[time_info->tm_wday].c_str());
   display->drawString(64 + x, 5 + y, String(buff));
   display->setFont(ArialMT_Plain_24);
 
-  sprintf_P(buff, PSTR("%02d:%02d:%02d"), timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
+  sprintf_P(buff, PSTR("%02d:%02d:%02d"), time_info->tm_hour, time_info->tm_min,
+            time_info->tm_sec);
   display->drawString(64 + x, 22 + y, String(buff));
   display->setTextAlignment(TEXT_ALIGN_LEFT);
 }
 
-void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
+void DrawCurrentWeather(OLEDDisplay* display, OLEDDisplayUiState* state,
+                        int16_t x, int16_t y) {
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
-  display->drawString(64 + x, 38 + y, currentWeather.cond_txt+" | Wind: "+currentWeather.wind_sc);
+  display->drawString(64 + x, 38 + y,
+                      current_weather.cond_txt + " | Wind: " +
+                          current_weather.wind_sc);
 
   display->setFont(ArialMT_Plain_24);
   display->setTextAlignment(TEXT_ALIGN_LEFT);
-  String temp = currentWeather.tmp + "°C" ;
+  String temp = current_weather.tmp + "°C";
   display->drawString(60 + x, 3 + y, temp);
   display->setFont(ArialMT_Plain_10);
-  display->drawString(70 + x, 26 + y, currentWeather.fl+"°C | "+currentWeather.hum+"%");
+  display->drawString(70 + x, 26 + y,
+                      current_weather.fl + "°C | " + current_weather.hum + "%");
   display->setFont(Meteocons_Plain_36);
   display->setTextAlignment(TEXT_ALIGN_CENTER);
-  display->drawString(32 + x, 0 + y, currentWeather.iconMeteoCon);
+  display->drawString(32 + x, 0 + y, current_weather.icon_meteo_con);
 }
 
-
-void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
-  drawForecastDetails(display, x, y, 0);
-  drawForecastDetails(display, x + 44, y, 1);
-  drawForecastDetails(display, x + 88, y, 2);
+void DrawForecast(OLEDDisplay* display, OLEDDisplayUiState* state, int16_t x,
+                  int16_t y) {
+  DrawForecastDetails(display, x, y, 0);
+  DrawForecastDetails(display, x + 44, y, 1);
+  DrawForecastDetails(display, x + 88, y, 2);
 }
 
-void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex) {
-
+void DrawForecastDetails(OLEDDisplay* display, int x, int y, int day_index) {
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
-  display->drawString(x + 20, y, foreWeather[dayIndex].datestr);
+  display->drawString(x + 20, y, fore_weather[day_index].date_str);
   display->setFont(Meteocons_Plain_21);
-  display->drawString(x + 20, y + 12, foreWeather[dayIndex].iconMeteoCon);
+  display->drawString(x + 20, y + 12, fore_weather[day_index].icon_meteo_con);
 
-  String temp=foreWeather[dayIndex].tmp_min+" | "+foreWeather[dayIndex].tmp_max;
+  String temp =
+      fore_weather[day_index].tmp_min + " | " + fore_weather[day_index].tmp_max;
   display->setFont(ArialMT_Plain_10);
   display->drawString(x + 20, y + 34, temp);
   display->setTextAlignment(TEXT_ALIGN_LEFT);
 }
 
-void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
+void DrawHeaderOverlay(OLEDDisplay* display, OLEDDisplayUiState* state) {
   now = time(nullptr);
-  struct tm* timeInfo;
-  timeInfo = localtime(&now);
+  struct tm* time_info;
+  time_info = localtime(&now);
   char buff[14];
-  sprintf_P(buff, PSTR("%02d:%02d"), timeInfo->tm_hour, timeInfo->tm_min);
+  sprintf_P(buff, PSTR("%02d:%02d"), time_info->tm_hour, time_info->tm_min);
 
   display->setColor(WHITE);
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_LEFT);
   display->drawString(6, 54, String(buff));
   display->setTextAlignment(TEXT_ALIGN_RIGHT);
-  String temp =currTemp +"°C";
+  String temp = curr_temp + "°C";
   display->drawString(128, 54, temp);
   display->drawHorizontalLine(0, 52, 128);
 }
 
-void setReadyForWeatherUpdate() {
+void SetReadyForWeatherUpdate() {
   Serial.println("Setting readyForUpdate to true");
-  readyForWeatherUpdate = true;
+  ready_for_weather_update = true;
 }
